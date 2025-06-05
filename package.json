@@ -1,17 +1,17 @@
 {
   "name": "robot-vocal-ia",
   "version": "1.0.0",
-  "description": "Robot vocal IA Twilio + GPT",
+  "description": "Assistant vocal IA en français avec Google Cloud Text-to-Speech",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.9.0",
-    "body-parser": "^1.20.2",
-    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "openai": "^4.19.0",
-    "twilio": "^4.21.0"
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.8",
+    "@google-cloud/text-to-speech": "^4.4.0",
+    "dotenv": "^16.3.1"
   }
 }
