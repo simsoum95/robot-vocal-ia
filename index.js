@@ -4,7 +4,6 @@ const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fs = require('fs');
-const textToSpeech = require('@google-cloud/text-to-speech');
 const util = require('util');
 
 require('dotenv').config();
