@@ -1,68 +1,62 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const axios = require("axios");
-const { OpenAI } = require("openai");
-const { Twilio } = require("twilio");
-const { VoiceResponse } = require("twilio").twiml;
-require("dotenv").config();
+// index.js
+import express from "express";
+import bodyParser from "body-parser";
+import { OpenAI } from "openai";
+import { Twilio } from "twilio";
+import { writeFile } from "fs/promises";
+import fetch from "node-fetch";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+dotenv.config();
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-
 const port = process.env.PORT || 3000;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const client = new Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const twilio = new Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-let previousPrompt = "Tu es l'assistante de Monsieur Haliwa, expert en intelligence artificielle. Tu parles poliment, avec une voix douce, professionnelle et rassurante.";
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use("/public", express.static(path.join(__dirname, "public")));
+
+let lastUserText = "";
 
 app.post("/voice", async (req, res) => {
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather({ input: "speech", action: "/gather", method: "POST", timeout: 6 });
-  gather.say("Bonjour, je suis l'assistante de Monsieur Haliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd'hui ?", { language: "fr-FR", voice: "alice" });
-  res.type("text/xml");
-  res.send(twiml.toString());
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.gather({ input: "speech", action: "/response", method: "POST", language: "fr-FR" })
+      .say({ voice: "alice", language: "fr-FR" }, "Bonjour, je suis l'assistante de Monsieur Haliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd'hui ?");
+  res.type("text/xml").send(twiml.toString());
 });
 
-app.post("/gather", async (req, res) => {
-  const userSpeech = req.body.SpeechResult;
-  console.log("Utilisateur a dit :", userSpeech);
+app.post("/response", async (req, res) => {
+  const userText = req.body.SpeechResult || "";
+  lastUserText = userText.toLowerCase();
 
-  if (!userSpeech || userSpeech.toLowerCase().includes("non")) {
-    const twiml = new VoiceResponse();
-    twiml.say("Très bien, je vous souhaite une excellente journée. Au revoir !", { language: "fr-FR", voice: "alice" });
-    twiml.hangup();
-    res.type("text/xml");
-    return res.send(twiml.toString());
+  if (lastUserText.includes("non")) {
+    const hangupResponse = new twilio.twiml.VoiceResponse();
+    hangupResponse.say({ voice: "alice", language: "fr-FR" }, "Très bien, je vous souhaite une excellente journée. Au revoir.");
+    hangupResponse.hangup();
+    return res.type("text/xml").send(hangupResponse.toString());
   }
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: previousPrompt },
-        { role: "user", content: userSpeech }
-      ]
-    });
+  const aiResponse = await openai.chat.completions.create({
+    model: "gpt-4o-mini-2024-07-18",
+    messages: [
+      { role: "system", content: "Tu es une assistante vocale professionnelle, chaleureuse et très polie. Tu réponds toujours en français, avec un ton naturel, calme et humain." },
+      { role: "user", content: lastUserText }
+    ],
+    temperature: 0.6,
+  });
 
-    const responseText = completion.choices[0].message.content;
-    previousPrompt += `\nUtilisateur : ${userSpeech}\nAssistante : ${responseText}`;
+  const text = aiResponse.choices[0].message.content;
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.say({ voice: "alice", language: "fr-FR" }, text);
+  twiml.gather({ input: "speech", action: "/response", method: "POST", language: "fr-FR" });
 
-    const twiml = new VoiceResponse();
-    const gather = twiml.gather({ input: "speech", action: "/gather", method: "POST", timeout: 6 });
-    gather.say(responseText, { language: "fr-FR", voice: "alice" });
-    res.type("text/xml");
-    res.send(twiml.toString());
-  } catch (error) {
-    console.error("Erreur GPT:", error);
-    const twiml = new VoiceResponse();
-    twiml.say("Désolé, une erreur est survenue.", { language: "fr-FR", voice: "alice" });
-    twiml.hangup();
-    res.type("text/xml");
-    res.send(twiml.toString());
-  }
+  res.type("text/xml").send(twiml.toString());
 });
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Serveur actif sur le port ${port}`);
+app.listen(port, () => {
+  console.log("Serveur actif sur le port " + port);
 });
