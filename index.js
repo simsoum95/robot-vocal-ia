@@ -1,103 +1,86 @@
-// index.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
+const path = require("path");
+const { OpenAI } = require("openai");
 const axios = require("axios");
-const { twiml } = require("twilio");
-require("dotenv").config();
+const { twiml: { VoiceResponse } } = require("twilio");
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use("/public", express.static("public"));
+app.use("/public", express.static(path.join(__dirname, "public")));
 
 app.post("/voice", async (req, res) => {
-  const voiceResponse = new twiml.VoiceResponse();
+  const response = new VoiceResponse();
+
   const speech = req.body.SpeechResult || "";
 
-  try {
-    let message = "Bonjour, je suis l'assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider ?";
-
-    if (speech.toLowerCase().includes("non")) {
-      message = "Très bien, je raccroche. Passez une bonne journée.";
-      voiceResponse.say({ voice: 'Polly.Celine', language: 'fr-FR' }, message);
-      voiceResponse.hangup();
-    } else if (speech.trim().length > 2) {
-      // Appel � OpenAI pour r�pondre intelligemment
-      const gptReply = await generateResponse(speech);
-      message = `Un instant... ${gptReply}`;
-
-      // Appel � ElevenLabs
-      const audioBuffer = await textToSpeech(message);
-      fs.writeFileSync("./public/response.mp3", audioBuffer);
-
-      voiceResponse.play({}, `${process.env.BASE_URL}/public/response.mp3`);
-    } else {
-      voiceResponse.say({ voice: 'Polly.Celine', language: 'fr-FR' }, message);
-      voiceResponse.gather({ input: 'speech', timeout: 3 });
-    }
-  } catch (e) {
-    console.error("Erreur: ", e);
-    voiceResponse.say("Désolé, une erreur est survenue.");
+  if (speech.toLowerCase().includes("non")) {
+    response.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien, je vous souhaite une excellente journée. Au revoir !");
+    response.hangup();
+    return res.type("text/xml").send(response.toString());
   }
 
-  res.type("text/xml");
-  res.send(voiceResponse.toString());
-});
-
-app.listen(port, () => {
-  console.log("Serveur actif sur le port " + port);
-});
-
-async function generateResponse(prompt) {
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini-2024-07-18",
+  let text = "Bonjour, je suis l’assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider ?";
+  if (speech) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
         messages: [
-          {
-            role: "system",
-            content:
-              "Tu es une assistante téléphonique pour Monsieur Aliwa, expert en intelligence artificielle. Tu es polie, douce, efficace, et toujours utile."
-          },
-          { role: "user", content: prompt }
+          { role: "system", content: "Tu es l’assistante virtuelle professionnelle de Monsieur Aliwa, spécialisée en intelligence artificielle. Sois polie, douce, utile et concise." },
+          { role: "user", content: speech }
         ]
-      },
-      {
-        headers: {
-          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-    return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error("Erreur GPT:", error.response?.data || error.message);
-    return "Je suis désolée, une erreur est survenue.";
-  }
-}
+      });
 
-async function textToSpeech(text) {
+      text = "Un instant... " + completion.choices[0].message.content;
+    } catch (err) {
+      text = "Je suis désolée, une erreur est survenue.";
+      console.error("Erreur OpenAI :", err.message);
+    }
+  }
+
   try {
-    const response = await axios({
+    const audio = await axios({
       method: "POST",
-      url: `https://api.elevenlabs.io/v1/text-to-speech/rbFGGoDXFHtVghjHuS3E`,
+      url: "https://api.elevenlabs.io/v1/text-to-speech/" + process.env.ELEVEN_VOICE_ID,
       headers: {
-        accept: "audio/mpeg",
         "xi-api-key": process.env.ELEVEN_API_KEY,
         "Content-Type": "application/json"
       },
       data: {
         text,
-        model_id: "eleven_monolingual_v1",
-        voice_settings: { stability: 0.4, similarity_boost: 1 }
+        model_id: "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75
+        }
       },
       responseType: "arraybuffer"
     });
-    return response.data;
-  } catch (error) {
-    console.error("Erreur ElevenLabs:", error.response?.data || error.message);
-    throw new Error("Erreur lors de la génération audio");
+
+    const filePath = path.join(__dirname, "public", "response.mp3");
+    fs.writeFileSync(filePath, audio.data);
+
+    response.play({}, `${process.env.BASE_URL}/public/response.mp3`);
+    response.gather({
+      input: "speech",
+      action: "/voice",
+      method: "POST",
+      timeout: 10
+    });
+  } catch (err) {
+    console.error("Erreur ElevenLabs :", err.message);
+    response.say({ voice: "Polly.Celine", language: "fr-FR" }, "Je suis désolée, une erreur est survenue.");
   }
-}
+
+  res.type("text/xml");
+  res.send(response.toString());
+});
+
+app.listen(port, () => {
+  console.log(`Serveur actif sur le port ${port}`);
+});
