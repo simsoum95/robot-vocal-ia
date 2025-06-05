@@ -25,7 +25,7 @@ app.post('/voice', async (req, res) => {
     });
 
     gather.say(
-      { voice: 'alice', language: 'fr-FR' },
+      { voice: 'Polly.Celine', language: 'fr-FR' },
       "Bonjour, je suis l’assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?"
     );
 
@@ -35,14 +35,14 @@ app.post('/voice', async (req, res) => {
 
   // Si l'utilisateur dit "non", on raccroche gentiment
   if (userSpeech.toLowerCase().includes("non")) {
-    twiml.say({ voice: 'alice', language: 'fr-FR' }, "Très bien. Je vous souhaite une excellente journée. Au revoir !");
+    twiml.say({ voice: 'Polly.Celine', language: 'fr-FR' }, "Très bien. Je vous souhaite une excellente journée. Au revoir !");
     twiml.hangup();
     res.type('text/xml');
     return res.send(twiml.toString());
   }
 
   // Sinon on continue la conversation avec l’IA
-  const waiting = twiml.say({ voice: 'alice', language: 'fr-FR' });
+  const waiting = twiml.say({ voice: 'Polly.Celine', language: 'fr-FR' });
   waiting.pause({ length: 1 });
   waiting.say("Un instant, je réfléchis...");
 
@@ -63,14 +63,14 @@ app.post('/voice', async (req, res) => {
       method: 'POST'
     });
 
-    gather.say({ voice: 'alice', language: 'fr-FR' }, answer);
+    gather.say({ voice: 'Polly.Celine', language: 'fr-FR' }, answer);
 
     res.type('text/xml');
     res.send(twiml.toString());
 
   } catch (error) {
     console.error("Erreur GPT:", error.message);
-    twiml.say({ voice: 'alice', language: 'fr-FR' }, "Désolé, une erreur est survenue. Veuillez réessayer plus tard.");
+    twiml.say({ voice: 'Polly.Celine', language: 'fr-FR' }, "Désolé, une erreur est survenue. Veuillez réessayer plus tard.");
     res.type('text/xml');
     res.send(twiml.toString());
   }
