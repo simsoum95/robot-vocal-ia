@@ -1,85 +1,97 @@
-// index.js
-const express = require('express');
-const bodyParser = require('body-parser');
-const { OpenAI } = require('openai');
-const twilio = require('twilio');
-const fs = require('fs');
-const util = require('util');
+// index.js sans ElevenLabs, voix naturelle Twilio (Polly.Celine)
+const express = require("express");
+const bodyParser = require("body-parser");
+const { OpenAI } = require("openai");
+const twilio = require("twilio");
 
-require('dotenv').config();
+require("dotenv").config();
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(express.static('public'));
-
 const port = process.env.PORT || 3000;
-const baseUrl = process.env.BASE_URL;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const client = new textToSpeech.TextToSpeechClient();
-const twiml = twilio.twiml;
+app.use(bodyParser.urlencoded({ extended: false }));
 
-let conversationHistory = [
-  {
-    role: 'system',
-    content: "Tu es une assistante virtuelle vocale, polie, douce, professionnelle, qui représente Monsieur Haliwa, un expert en intelligence artificielle. Tu t'exprimes en français, avec clarté, et tu proposes de l'aide dès que possible."
-  }
-];
+let lastUserInput = "";
 
-app.post('/voice', async (req, res) => {
-  const twilioResponse = new twiml.VoiceResponse();
-  twilioResponse.play({}, `${baseUrl}/public/intro.mp3`);
-  twilioResponse.record({
-    timeout: 5,
-    transcribe: true,
-    transcribeCallback: '/transcribe'
-  });
-  res.type('text/xml');
-  res.send(twilioResponse.toString());
-});
+app.post("/voice", async (req, res) => {
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const twiml = new VoiceResponse();
 
-app.post('/transcribe', async (req, res) => {
-  const userText = req.body.TranscriptionText;
-  console.log("Utilisateur a dit :", userText);
-
-  if (!userText) return res.end();
-  if (userText.toLowerCase().includes("non")) {
-    const goodbye = new twiml.VoiceResponse();
-    goodbye.say({ language: 'fr-FR', voice: 'Polly.Celine' }, "Très bien. Je vous souhaite une excellente journée. Au revoir.");
-    goodbye.hangup();
-    res.type('text/xml');
-    return res.send(goodbye.toString());
-  }
-
-  conversationHistory.push({ role: 'user', content: userText });
-
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini-2024-07-18',
-    messages: conversationHistory,
+  const gather = twiml.gather({
+    input: "speech",
+    speechTimeout: "auto",
+    action: "/process",
+    method: "POST",
+    language: "fr-FR",
+    voice: "Polly.Celine"
   });
 
-  const assistantReply = completion.choices[0].message.content;
-  conversationHistory.push({ role: 'assistant', content: assistantReply });
+  gather.say(
+    {
+      voice: "Polly.Celine",
+      language: "fr-FR"
+    },
+    "Bonjour, je suis l'assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?"
+  );
 
-  console.log("Assistant :", assistantReply);
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
 
-  const request = {
-    input: { text: assistantReply },
-    voice: { languageCode: 'fr-FR', name: 'fr-FR-Wavenet-E' },
-    audioConfig: { audioEncoding: 'MP3' },
-  };
+app.post("/process", async (req, res) => {
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const twiml = new VoiceResponse();
 
-  const [response] = await client.synthesizeSpeech(request);
-  await util.promisify(fs.writeFile)('./public/response.mp3', response.audioContent, 'binary');
+  const userSpeech = req.body.SpeechResult;
 
-  const responseTwiml = new twiml.VoiceResponse();
-  responseTwiml.play({}, `${baseUrl}/public/response.mp3`);
-  responseTwiml.redirect('/voice');
-  res.type('text/xml');
-  res.send(responseTwiml.toString());
+  if (!userSpeech) {
+    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Désolé, je n'ai pas compris. Pouvez-vous répéter ?");
+    twiml.redirect("/voice");
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+
+  // Si la personne dit "non" -> on raccroche
+  if (userSpeech.trim().toLowerCase().includes("non")) {
+    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien. Passez une excellente journée ! Au revoir.");
+    twiml.hangup();
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+
+  try {
+    const chatCompletion = await openai.chat.completions.create({
+      model: "gpt-4o-mini-2024-07-18",
+      messages: [
+        { role: "system", content: "Tu es une assistante téléphonique très polie, professionnelle et efficace. Tu t’exprimes avec douceur, en français, et tu aides les clients comme une vraie secrétaire personnelle. Si la personne semble vouloir raccrocher, propose de l’aide une dernière fois, puis dis au revoir." },
+        { role: "user", content: userSpeech }
+      ]
+    });
+
+    const aiReply = chatCompletion.choices[0].message.content;
+    lastUserInput = userSpeech;
+
+    const gather = twiml.gather({
+      input: "speech",
+      speechTimeout: "auto",
+      action: "/process",
+      method: "POST",
+      language: "fr-FR",
+      voice: "Polly.Celine"
+    });
+
+    gather.say({ voice: "Polly.Celine", language: "fr-FR" }, aiReply);
+    res.type("text/xml");
+    res.send(twiml.toString());
+  } catch (error) {
+    console.error("Erreur GPT:", error);
+    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Une erreur est survenue. Veuillez réessayer plus tard.");
+    twiml.hangup();
+    res.type("text/xml");
+    res.send(twiml.toString());
+  }
 });
 
 app.listen(port, () => {
