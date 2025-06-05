@@ -1,77 +1,103 @@
-require('dotenv').config();
-const express = require('express');
-const bodyParser = require('body-parser');
-const fs = require('fs');
-const axios = require('axios');
-const { OpenAI } = require("openai");
-const { exec } = require('child_process');
+// index.js
+const express = require("express");
+const bodyParser = require("body-parser");
+const fs = require("fs");
+const axios = require("axios");
+const { twiml } = require("twilio");
+require("dotenv").config();
 
 const app = express();
+const port = process.env.PORT || 3000;
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use("/public", express.static("public"));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const ELEVENLABS_API_KEY = "sk_c0ebb91c0d38d70e17f6fe39f790a2cd48f3377b9570b50a";
-const ELEVENLABS_VOICE_ID = "rbFGGoDXFHtVghjHuS3E";
-const publicPath = __dirname + "/public";
-
-app.use('/public', express.static(publicPath));
-
-app.post('/voice', async (req, res) => {
-  const twiml = new require('twilio').twiml.VoiceResponse();
-  const speech = req.body.SpeechResult || '';
-
-  const defaultIntro = "Bonjour, je suis l’assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?";
-  let responseText = defaultIntro;
+app.post("/voice", async (req, res) => {
+  const voiceResponse = new twiml.VoiceResponse();
+  const speech = req.body.SpeechResult || "";
 
   try {
-    if (speech && speech.length > 2) {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [{ role: "user", content: speech }],
-      });
-      responseText = completion.choices[0].message.content || defaultIntro;
+    let message = "Bonjour, je suis l'assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider ?";
+
+    if (speech.toLowerCase().includes("non")) {
+      message = "Très bien, je raccroche. Passez une bonne journée.";
+      voiceResponse.say({ voice: 'Polly.Celine', language: 'fr-FR' }, message);
+      voiceResponse.hangup();
+    } else if (speech.trim().length > 2) {
+      // Appel � OpenAI pour r�pondre intelligemment
+      const gptReply = await generateResponse(speech);
+      message = `Un instant... ${gptReply}`;
+
+      // Appel � ElevenLabs
+      const audioBuffer = await textToSpeech(message);
+      fs.writeFileSync("./public/response.mp3", audioBuffer);
+
+      voiceResponse.play({}, `${process.env.BASE_URL}/public/response.mp3`);
+    } else {
+      voiceResponse.say({ voice: 'Polly.Celine', language: 'fr-FR' }, message);
+      voiceResponse.gather({ input: 'speech', timeout: 3 });
     }
-  } catch (error) {
-    console.error("Erreur OpenAI :", error.message);
-    responseText = "Désolé, une erreur est survenue.";
+  } catch (e) {
+    console.error("Erreur: ", e);
+    voiceResponse.say("Désolé, une erreur est survenue.");
   }
 
+  res.type("text/xml");
+  res.send(voiceResponse.toString());
+});
+
+app.listen(port, () => {
+  console.log("Serveur actif sur le port " + port);
+});
+
+async function generateResponse(prompt) {
   try {
-    const audio = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
       {
-        text: responseText,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.8
-        }
+        model: "gpt-4o-mini-2024-07-18",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Tu es une assistante téléphonique pour Monsieur Aliwa, expert en intelligence artificielle. Tu es polie, douce, efficace, et toujours utile."
+          },
+          { role: "user", content: prompt }
+        ]
       },
       {
         headers: {
-          "xi-api-key": ELEVENLABS_API_KEY,
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
           "Content-Type": "application/json"
-        },
-        responseType: "arraybuffer"
+        }
       }
     );
-
-    fs.writeFileSync(publicPath + "/response.mp3", audio.data);
-    twiml.play({}, `${req.protocol}://${req.get("host")}/public/response.mp3`);
+    return response.data.choices[0].message.content;
   } catch (error) {
-    console.error("Erreur ElevenLabs :", error.message);
-    twiml.say("Désolé, je ne peux pas parler pour le moment.");
+    console.error("Erreur GPT:", error.response?.data || error.message);
+    return "Je suis désolée, une erreur est survenue.";
   }
+}
 
-  res.type('text/xml');
-  res.send(twiml.toString());
-});
-
-app.get('/', (req, res) => res.send('Assistant vocal IA en ligne.'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Serveur actif sur le port ${PORT}`));
+async function textToSpeech(text) {
+  try {
+    const response = await axios({
+      method: "POST",
+      url: `https://api.elevenlabs.io/v1/text-to-speech/rbFGGoDXFHtVghjHuS3E`,
+      headers: {
+        accept: "audio/mpeg",
+        "xi-api-key": process.env.ELEVEN_API_KEY,
+        "Content-Type": "application/json"
+      },
+      data: {
+        text,
+        model_id: "eleven_monolingual_v1",
+        voice_settings: { stability: 0.4, similarity_boost: 1 }
+      },
+      responseType: "arraybuffer"
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Erreur ElevenLabs:", error.response?.data || error.message);
+    throw new Error("Erreur lors de la génération audio");
+  }
+}
