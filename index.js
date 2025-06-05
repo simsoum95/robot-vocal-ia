@@ -1,66 +1,81 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const { OpenAI } = require('openai');
-const twilio = require('twilio');
+const { twiml: { VoiceResponse } } = require('twilio');
+const OpenAI = require("openai");
 
 const app = express();
-const port = process.env.PORT || 3000;
+app.use(bodyParser.urlencoded({ extended: false }));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-
 app.post('/voice', async (req, res) => {
-  const twiml = new twilio.twiml.VoiceResponse();
+  const userSpeech = req.body.SpeechResult || "";
 
-  const speech = req.body.SpeechResult || '';
+  const twiml = new VoiceResponse();
 
-  // Si c’est le début de l’appel, on demande de parler
-  if (!speech) {
+  // Si c’est le premier appel sans texte, on commence l’accueil
+  if (!userSpeech) {
     const gather = twiml.gather({
       input: 'speech',
       action: '/voice',
-      speechTimeout: 'auto',
-      language: 'fr-FR'
+      method: 'POST'
     });
-    gather.say({ voice: 'alice', language: 'fr-FR' }, "Bonjour, comment puis-je vous aider ?");
-    return res.type('text/xml').send(twiml.toString());
+
+    gather.say(
+      { voice: 'alice', language: 'fr-FR' },
+      "Bonjour, je suis l’assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?"
+    );
+
+    res.type('text/xml');
+    return res.send(twiml.toString());
   }
 
-  // Répondre immédiatement pendant le traitement
-  const wait = twiml.say({ voice: 'alice', language: 'fr-FR' }, "Un instant...");
-  await new Promise(resolve => setTimeout(resolve, 500)); // petite pause factice
+  // Si l'utilisateur dit "non", on raccroche gentiment
+  if (userSpeech.toLowerCase().includes("non")) {
+    twiml.say({ voice: 'alice', language: 'fr-FR' }, "Très bien. Je vous souhaite une excellente journée. Au revoir !");
+    twiml.hangup();
+    res.type('text/xml');
+    return res.send(twiml.toString());
+  }
+
+  // Sinon on continue la conversation avec l’IA
+  const waiting = twiml.say({ voice: 'alice', language: 'fr-FR' });
+  waiting.pause({ length: 1 });
+  waiting.say("Un instant, je réfléchis...");
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      messages: [{ role: "user", content: speech }],
-      max_tokens: 100,
-      temperature: 0.7
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: "Tu es une assistante vocale douce, polie et professionnelle. Tu aides les gens pour prendre rendez-vous, donner des infos sur les projets de Monsieur Aliwa ou ses services." },
+        { role: "user", content: userSpeech }
+      ]
     });
 
-    const responseText = completion.choices[0].message.content;
+    const answer = completion.choices[0].message.content;
 
     const gather = twiml.gather({
       input: 'speech',
       action: '/voice',
-      speechTimeout: 'auto',
-      language: 'fr-FR'
+      method: 'POST'
     });
-    gather.say({ voice: 'alice', language: 'fr-FR' }, responseText + " Souhaitez-vous autre chose ?");
+
+    gather.say({ voice: 'alice', language: 'fr-FR' }, answer);
+
+    res.type('text/xml');
+    res.send(twiml.toString());
 
   } catch (error) {
-    console.error("Erreur OpenAI:", error.message);
-    twiml.say({ voice: 'alice', language: 'fr-FR' }, "Désolé, une erreur est survenue.");
+    console.error("Erreur GPT:", error.message);
+    twiml.say({ voice: 'alice', language: 'fr-FR' }, "Désolé, une erreur est survenue. Veuillez réessayer plus tard.");
+    res.type('text/xml');
+    res.send(twiml.toString());
   }
-
-  res.type('text/xml').send(twiml.toString());
 });
 
-app.listen(port, () => {
-  console.log(`Serveur en ligne sur le port ${port}`);
-});
+app.get('/', (req, res) => res.send('Robot vocal IA en ligne'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Serveur en ligne sur le port", PORT));
