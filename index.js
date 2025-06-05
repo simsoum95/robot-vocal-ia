@@ -1,4 +1,4 @@
-// index.js sans ElevenLabs, voix naturelle Twilio (Polly.Celine)
+// index.js sans ElevenLabs, voix naturelle Twilio (manon)
 const express = require("express");
 const bodyParser = require("body-parser");
 const { OpenAI } = require("openai");
@@ -25,12 +25,12 @@ app.post("/voice", async (req, res) => {
     action: "/process",
     method: "POST",
     language: "fr-FR",
-    voice: "Polly.Celine"
+    voice: "manon"
   });
 
   gather.say(
     {
-      voice: "Polly.Celine",
+      voice: "manon",
       language: "fr-FR"
     },
     "Bonjour, je suis l'assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?"
@@ -47,7 +47,7 @@ app.post("/process", async (req, res) => {
   const userSpeech = req.body.SpeechResult;
 
   if (!userSpeech) {
-    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Désolé, je n'ai pas compris. Pouvez-vous répéter ?");
+    twiml.say({ voice: "manon", language: "fr-FR" }, "Désolé, je n'ai pas compris. Pouvez-vous répéter ?");
     twiml.redirect("/voice");
     res.type("text/xml");
     return res.send(twiml.toString());
@@ -55,7 +55,7 @@ app.post("/process", async (req, res) => {
 
   // Si la personne dit "non" -> on raccroche
   if (userSpeech.trim().toLowerCase().includes("non")) {
-    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien. Passez une excellente journée ! Au revoir.");
+    twiml.say({ voice: "manon", language: "fr-FR" }, "Très bien. Passez une excellente journée ! Au revoir.");
     twiml.hangup();
     res.type("text/xml");
     return res.send(twiml.toString());
@@ -79,15 +79,15 @@ app.post("/process", async (req, res) => {
       action: "/process",
       method: "POST",
       language: "fr-FR",
-      voice: "Polly.Celine"
+      voice: "manon"
     });
 
-    gather.say({ voice: "Polly.Celine", language: "fr-FR" }, aiReply);
+    gather.say({ voice: "manon", language: "fr-FR" }, aiReply);
     res.type("text/xml");
     res.send(twiml.toString());
   } catch (error) {
     console.error("Erreur GPT:", error);
-    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Une erreur est survenue. Veuillez réessayer plus tard.");
+    twiml.say({ voice: "manon", language: "fr-FR" }, "Une erreur est survenue. Veuillez réessayer plus tard.");
     twiml.hangup();
     res.type("text/xml");
     res.send(twiml.toString());
