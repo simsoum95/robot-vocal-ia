@@ -55,6 +55,27 @@ async function sendEmail(subject, message, senderInfo = '') {
   }
 }
 
+// Fonction pour détecter si l'appelant veut terminer l'appel
+function wantsToEndCall(speech) {
+  const endCallPhrases = [
+    "terminer l'appel",
+    "raccrocher",
+    "c'est tout",
+    "ça sera tout",
+    "vous pouvez raccrocher",
+    "fin de l'appel",
+    "au revoir",
+    "bonne journée",
+    "merci c'est tout",
+    "j'ai terminé",
+    "plus rien",
+    "rien d'autre"
+  ];
+  
+  const lowerSpeech = speech.toLowerCase();
+  return endCallPhrases.some(phrase => lowerSpeech.includes(phrase));
+}
+
 let conversationContext = {};
 
 app.post("/voice", async (req, res) => {
@@ -153,10 +174,11 @@ app.post("/process", async (req, res) => {
     return res.send(twiml.toString());
   }
 
-  // Si la personne dit "non" ou veut raccrocher
-  if (userSpeech.trim().toLowerCase().includes("non") && !userSpeech.toLowerCase().includes("rendez-vous") && !userSpeech.toLowerCase().includes("problème")) {
-    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien, bonne journée.");
+  // Vérifier si l'appelant veut terminer l'appel
+  if (wantsToEndCall(userSpeech)) {
+    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien, bonne journée et merci d'avoir appelé Dream Team.");
     twiml.hangup();
+    delete conversationContext[callSid];
     res.type("text/xml");
     return res.send(twiml.toString());
   }
@@ -172,7 +194,10 @@ app.post("/process", async (req, res) => {
           - "HORAIRES" si la personne demande les horaires d'ouverture
           - "RENDEZ_VOUS" si la personne veut prendre rendez-vous avec Monsieur Haliwa
           - "PROBLEME" si la personne dit avoir un problème, expose un problème ou pose une question
+          - "TRANSFERT" si la personne demande explicitement à être transférée ou à parler à quelqu'un
           - "AUTRE" pour tout autre cas
+          
+          IMPORTANT: Le mot "non" seul ne doit pas être interprété comme une fin d'appel. Analyse le contexte complet.
           
           Ne réponds que par un seul mot.`
         },
@@ -184,8 +209,8 @@ app.post("/process", async (req, res) => {
 
     if (intention === "HORAIRES") {
       // Gestion des demandes d'horaires
-      if (!conversationContext[callSid]) {
-        conversationContext[callSid] = { step: "horaires_response" };
+      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "horaires") {
+        conversationContext[callSid] = { step: "horaires_response", lastAction: "horaires" };
         
         const gather = twiml.gather({
           input: "speech",
@@ -219,8 +244,8 @@ app.post("/process", async (req, res) => {
           }, "Parfait. Pouvez-vous me donner votre adresse email s'il vous plaît ?");
           
         } else {
-          // Pas d'email souhaité
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Très bien. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+          // Pas d'email souhaité - continuer la conversation
+          conversationContext[callSid] = { lastAction: "completed" };
           
           const gather = twiml.gather({
             input: "speech",
@@ -229,8 +254,11 @@ app.post("/process", async (req, res) => {
             method: "POST",
             language: "fr-FR"
           });
-          
-          delete conversationContext[callSid];
+
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Très bien. Y a-t-il autre chose pour laquelle je peux vous aider ?");
         }
       } else if (conversationContext[callSid].step === "get_email_horaires") {
         // Envoyer les horaires par email
@@ -240,20 +268,39 @@ app.post("/process", async (req, res) => {
           `Email de contact: ${userSpeech}\nEnvoyé le: ${new Date().toLocaleString('fr-FR')}`
         );
 
-        if (emailSent) {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Parfait, les horaires d'ouverture vous ont été envoyés par email. Bonne journée.");
-        } else {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Désolée, une erreur est survenue lors de l'envoi de l'email. Nos horaires sont du dimanche au jeudi de 9 heures à 18 heures.");
-        }
+        conversationContext[callSid] = { lastAction: "completed" };
         
-        twiml.hangup();
-        delete conversationContext[callSid];
+        const gather = twiml.gather({
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        });
+
+        if (emailSent) {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Parfait, les horaires d'ouverture vous ont été envoyés par email. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        } else {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Désolée, une erreur est survenue lors de l'envoi de l'email. Nos horaires sont du dimanche au jeudi de 9 heures à 18 heures. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        }
       }
+
+    } else if (intention === "TRANSFERT") {
+      // Transfert direct demandé
+      twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Je vous transfère à Monsieur Haliwa. Veuillez patienter.");
+      twiml.dial("+972584469947");
+      delete conversationContext[callSid];
 
     } else if (intention === "RENDEZ_VOUS") {
       // Gestion des rendez-vous
-      if (!conversationContext[callSid]) {
-        conversationContext[callSid] = { step: "rdv_choice", originalMessage: userSpeech };
+      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "rendez_vous") {
+        conversationContext[callSid] = { step: "rdv_choice", originalMessage: userSpeech, lastAction: "rendez_vous" };
         
         const gather = twiml.gather({
           input: "speech",
@@ -314,20 +361,33 @@ app.post("/process", async (req, res) => {
           `Reçu le: ${new Date().toLocaleString('fr-FR')}`
         );
 
-        if (emailSent) {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Parfait, votre demande de rendez-vous a été transmise à Monsieur Haliwa. Il vous recontactera dans les plus brefs délais. Bonne journée.");
-        } else {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Désolée, une erreur est survenue. Veuillez rappeler plus tard ou contacter directement Monsieur Haliwa au +972584469947.");
-        }
+        conversationContext[callSid] = { lastAction: "completed" };
         
-        twiml.hangup();
-        delete conversationContext[callSid];
+        const gather = twiml.gather({
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        });
+
+        if (emailSent) {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Parfait, votre demande de rendez-vous a été transmise à Monsieur Haliwa. Il vous recontactera dans les plus brefs délais. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        } else {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Désolée, une erreur est survenue. Veuillez rappeler plus tard ou contacter directement Monsieur Haliwa au +972584469947. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        }
       }
 
     } else if (intention === "PROBLEME") {
       // Gestion des problèmes/questions
-      if (!conversationContext[callSid]) {
-        conversationContext[callSid] = { step: "problem_choice", originalMessage: userSpeech };
+      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "probleme") {
+        conversationContext[callSid] = { step: "problem_choice", originalMessage: userSpeech, lastAction: "probleme" };
         
         const gather = twiml.gather({
           input: "speech",
@@ -388,14 +448,27 @@ app.post("/process", async (req, res) => {
           `Reçu le: ${new Date().toLocaleString('fr-FR')}`
         );
 
-        if (emailSent) {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Merci, votre message a été transmis à la direction. Vous recevrez une réponse dans les plus brefs délais. Bonne journée.");
-        } else {
-          twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Désolée, une erreur est survenue. Veuillez rappeler plus tard.");
-        }
+        conversationContext[callSid] = { lastAction: "completed" };
         
-        twiml.hangup();
-        delete conversationContext[callSid];
+        const gather = twiml.gather({
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        });
+
+        if (emailSent) {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Merci, votre message a été transmis à la direction. Vous recevrez une réponse dans les plus brefs délais. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        } else {
+          gather.say({ 
+            voice: "Polly.Celine", 
+            language: "fr-FR" 
+          }, "Désolée, une erreur est survenue. Veuillez rappeler plus tard. Y a-t-il autre chose pour laquelle je peux vous aider ?");
+        }
       }
 
     } else {
@@ -419,8 +492,20 @@ app.post("/process", async (req, res) => {
 
   } catch (error) {
     console.error("Erreur GPT:", error);
-    twiml.say({ voice: "Polly.Celine", language: "fr-FR" }, "Une erreur est survenue. Veuillez réessayer plus tard.");
-    twiml.hangup();
+    
+    const gather = twiml.gather({
+      input: "speech",
+      speechTimeout: "auto",
+      action: "/process",
+      method: "POST",
+      language: "fr-FR"
+    });
+
+    gather.say({ 
+      voice: "Polly.Celine", 
+      language: "fr-FR" 
+    }, "Une erreur est survenue. Pouvez-vous répéter votre demande s'il vous plaît ?");
+    
     res.type("text/xml");
     res.send(twiml.toString());
   }
