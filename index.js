@@ -12,7 +12,9 @@ require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ 
+  apiKey: process.env.OPENAI_API_KEY || 'dummy-key-for-testing'
+});
 
 // Configuration email
 const transporter = nodemailer.createTransport({
@@ -33,6 +35,12 @@ if (!fs.existsSync('audio')) {
 
 // Function to generate speech with ElevenLabs
 async function generateSpeech(text, filename) {
+  // Check if ElevenLabs credentials are available
+  if (!process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_VOICE_ID) {
+    console.log('ElevenLabs credentials not available, using Twilio TTS');
+    return null;
+  }
+
   try {
     const response = await axios({
       method: 'post',
@@ -52,34 +60,55 @@ async function generateSpeech(text, filename) {
           use_speaker_boost: true
         }
       },
-      responseType: 'arraybuffer'
+      responseType: 'arraybuffer',
+      timeout: 10000 // 10 second timeout
     });
 
     const audioPath = path.join('audio', `${filename}.mp3`);
     fs.writeFileSync(audioPath, response.data);
+    console.log(`ElevenLabs audio generated: ${filename}.mp3`);
     return audioPath;
   } catch (error) {
-    console.error('Error generating speech:', error);
+    console.error('ElevenLabs API Error:', {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      message: error.message
+    });
+    
+    // Log specific error details for debugging
+    if (error.response?.status === 401) {
+      console.error('ElevenLabs Authentication Error: Check your API key and account status');
+    } else if (error.response?.status === 429) {
+      console.error('ElevenLabs Rate Limit: You have exceeded your usage limits');
+    } else if (error.response?.status === 422) {
+      console.error('ElevenLabs Validation Error: Check voice ID and request parameters');
+    }
+    
     return null;
   }
 }
 
-// Function to create TwiML with ElevenLabs audio
+// Function to create TwiML with ElevenLabs audio or fallback to Twilio TTS
 async function createTwiMLWithSpeech(text, gatherOptions = null) {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
   
-  // Generate unique filename
+  // Try to generate ElevenLabs audio first
   const filename = `speech_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const audioPath = await generateSpeech(text, filename);
   
-  if (audioPath && gatherOptions) {
-    const gather = twiml.gather(gatherOptions);
-    gather.play(`${process.env.BASE_URL || 'https://your-app-url.com'}/audio/${filename}.mp3`);
-  } else if (audioPath) {
-    twiml.play(`${process.env.BASE_URL || 'https://your-app-url.com'}/audio/${filename}.mp3`);
+  if (audioPath && process.env.BASE_URL) {
+    // Use ElevenLabs audio if successful
+    console.log('Using ElevenLabs audio');
+    if (gatherOptions) {
+      const gather = twiml.gather(gatherOptions);
+      gather.play(`${process.env.BASE_URL}/audio/${filename}.mp3`);
+    } else {
+      twiml.play(`${process.env.BASE_URL}/audio/${filename}.mp3`);
+    }
   } else {
-    // Fallback to Twilio's TTS if ElevenLabs fails
+    // Fallback to Twilio's TTS
+    console.log('Using Twilio TTS fallback');
     if (gatherOptions) {
       const gather = twiml.gather(gatherOptions);
       gather.say({ voice: "Polly.Celine", language: "fr-FR" }, text);
@@ -130,7 +159,7 @@ function wantsToEndCall(speech) {
     "terminer l'appel",
     "raccrocher",
     "c'est tout",
-    "ça sera tout",
+    "ça sera tout", 
     "vous pouvez raccrocher",
     "fin de l'appel",
     "au revoir",
@@ -140,11 +169,20 @@ function wantsToEndCall(speech) {
     "plus rien",
     "rien d'autre",
     "c'est bon",
-    "merci au revoir"
+    "merci au revoir",
+    "je raccroche",
+    "on peut terminer",
+    "c'est parfait merci"
   ];
   
-  const lowerSpeech = speech.toLowerCase();
-  return endCallPhrases.some(phrase => lowerSpeech.includes(phrase));
+  const lowerSpeech = speech.toLowerCase().trim();
+  
+  // Check for exact matches or phrases that clearly indicate ending
+  return endCallPhrases.some(phrase => {
+    return lowerSpeech.includes(phrase) || 
+           lowerSpeech === phrase ||
+           (lowerSpeech.startsWith(phrase.split(' ')[0]) && lowerSpeech.includes('tout'));
+  });
 }
 
 // Fonction améliorée pour analyser l'intention avec plus de contexte
@@ -155,44 +193,56 @@ async function analyzeIntent(userSpeech, conversationHistory = '') {
       messages: [
         { 
           role: "system", 
-          content: `Tu es un analyseur d'intentions pour un standard téléphonique professionnel. 
+          content: `Tu es un analyseur d'intentions pour un standard téléphonique professionnel français.
 
 CONTEXTE: Dream Team est une entreprise. L'appelant peut avoir différentes demandes.
 
-INSTRUCTIONS:
-- Analyse le message de l'appelant avec le contexte de la conversation
-- Sois flexible et compréhensif avec les variations de langage naturel
-- Réponds UNIQUEMENT par l'un de ces mots-clés:
+ANALYSE FLEXIBLE ET INTELLIGENTE:
+- Comprends l'intention RÉELLE même si les mots sont différents
+- Utilise le contexte de conversation pour mieux comprendre
+- Sois tolérant aux variations de langage naturel
+- Ne sois PAS trop strict sur les mots exacts
 
-HORAIRES: Si la personne demande les horaires d'ouverture, heures d'ouverture, quand vous êtes ouverts, etc.
-Exemples: "quels sont vos horaires", "vous êtes ouverts quand", "à quelle heure vous fermez"
+CATÉGORIES D'INTENTIONS (réponds par UN SEUL mot-clé):
 
-RENDEZ_VOUS: Si la personne veut prendre rendez-vous, un appointment, voir quelqu'un, planifier une rencontre
-Exemples: "je veux un rendez-vous", "prendre rendez-vous", "voir monsieur haliwa", "planifier une rencontre"
+HORAIRES: Questions sur les heures d'ouverture, planning, disponibilité
+- "quels sont vos horaires", "vous êtes ouverts quand", "à quelle heure", "quand fermez-vous"
 
-PROBLEME: Si la personne mentionne un problème, une question, une réclamation, quelque chose qui ne va pas
-Exemples: "j'ai un problème", "il y a un souci", "je veux me plaindre", "ça ne marche pas"
+RENDEZ_VOUS: Demandes de rendez-vous, appointments, rencontres
+- "je veux un rendez-vous", "prendre rendez-vous", "voir monsieur haliwa", "planifier", "appointment"
 
-TRANSFERT: Si la personne demande explicitement à parler à quelqu'un, être transférée, joindre la direction
-Exemples: "je veux parler à monsieur haliwa", "transférez-moi", "passez-moi la direction"
+PROBLEME: Problèmes, réclamations, dysfonctionnements, plaintes
+- "j'ai un problème", "il y a un souci", "ça ne marche pas", "je me plains", "réclamation"
 
-EMAIL: Si la personne veut envoyer un message, laisser un message, communiquer par écrit
-Exemples: "envoyez un email", "laissez un message", "notez que", "transmettez que"
+TRANSFERT: Demandes explicites de transfert ou parler à quelqu'un
+- "transférez-moi", "je veux parler à", "passez-moi", "joindre la direction"
 
-AUTRE: Pour les salutations simples, remerciements, ou demandes peu claires
+EMAIL: Demandes d'envoi de message, communication écrite
+- "envoyez un email", "laissez un message", "transmettez", "notez que"
 
-IMPORTANT: 
-- Ne sois pas trop strict sur les mots exacts
-- Comprends l'intention générale même si c'est dit différemment
+CONFIRMATION: Réponses positives (oui, d'accord, parfait)
+- "oui", "d'accord", "parfait", "très bien", "ok"
+
+REFUS: Réponses négatives mais PAS de fin d'appel
+- "non", "pas maintenant", "non merci" (mais continue la conversation)
+
+AUTRE: Salutations, remerciements, demandes peu claires
+
+RÈGLES IMPORTANTES:
 - Le mot "non" seul n'est PAS une fin d'appel
-- Utilise le contexte de conversation pour mieux comprendre`
+- Comprends l'intention générale même avec des mots différents
+- Utilise le contexte pour résoudre les ambiguïtés
+- Privilégie la compréhension naturelle sur la correspondance exacte`
         },
-        { role: "user", content: `Message actuel: "${userSpeech}"\n\nContexte conversation: ${conversationHistory}` }
+        { role: "user", content: `Message: "${userSpeech}"\nContexte: ${conversationHistory}` }
       ],
-      temperature: 0.1
+      temperature: 0.1,
+      max_tokens: 50
     });
 
-    return response.choices[0].message.content.trim();
+    const intent = response.choices[0].message.content.trim().toUpperCase();
+    console.log(`Intent detected: ${intent} for "${userSpeech}"`);
+    return intent;
   } catch (error) {
     console.error('Erreur analyse intention:', error);
     return 'AUTRE';
@@ -209,7 +259,8 @@ app.post("/voice", async (req, res) => {
     conversationContext[callSid] = {
       history: [],
       step: 'initial',
-      attempts: 0
+      attempts: 0,
+      lastIntent: null
     };
   }
 
@@ -285,7 +336,8 @@ app.post("/process", async (req, res) => {
     conversationContext[callSid] = {
       history: [],
       step: 'initial',
-      attempts: 0
+      attempts: 0,
+      lastIntent: null
     };
   }
 
@@ -344,6 +396,7 @@ app.post("/process", async (req, res) => {
     
     // Analyser l'intention avec le contexte
     const intention = await analyzeIntent(userSpeech, conversationHistory);
+    conversationContext[callSid].lastIntent = intention;
     
     console.log(`Intention détectée: ${intention} pour "${userSpeech}"`);
     
@@ -416,49 +469,79 @@ app.post("/process", async (req, res) => {
       conversationContext[callSid].step = "get_email_message";
       conversationContext[callSid].originalMessage = userSpeech;
 
+    } else if (intention === "CONFIRMATION") {
+      // Gestion des confirmations selon le contexte
+      if (conversationContext[callSid].step === "waiting_email_confirmation") {
+        // Envoyer les horaires par email
+        const emailSent = await sendEmail(
+          "Horaires d'ouverture",
+          `Voici nos horaires d'ouverture :\n\nDu dimanche au jeudi : 9h00 - 18h00\nVendredi et samedi : Fermé\n\nPour toute question, n'hésitez pas à nous contacter.`,
+          `Demandé le: ${new Date().toLocaleString('fr-FR')}`
+        );
+
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        let text;
+        if (emailSent) {
+          text = "Parfait, les horaires vous ont été envoyés par email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+        } else {
+          text = "Désolée, une erreur est survenue pour l'email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+        }
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+      } else {
+        // Confirmation générale
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        const text = "Très bien. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+      }
+
+    } else if (intention === "REFUS") {
+      // Gestion des refus selon le contexte
+      if (conversationContext[callSid].step === "waiting_email_confirmation") {
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        const text = "Très bien, pas d'email alors. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+      } else {
+        // Refus général - continuer la conversation
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        const text = "D'accord. Comment puis-je vous aider autrement ?";
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+      }
+
     } else {
       // Gestion des étapes de conversation en cours
-      if (conversationContext[callSid].step === "waiting_email_confirmation") {
-        if (userSpeech.toLowerCase().includes("oui") || userSpeech.toLowerCase().includes("email")) {
-          // Envoyer les horaires par email
-          const emailSent = await sendEmail(
-            "Horaires d'ouverture",
-            `Voici nos horaires d'ouverture :\n\nDu dimanche au jeudi : 9h00 - 18h00\nVendredi et samedi : Fermé\n\nPour toute question, n'hésitez pas à nous contacter.`,
-            `Demandé le: ${new Date().toLocaleString('fr-FR')}`
-          );
-
-          const gatherOptions = {
-            input: "speech",
-            speechTimeout: "auto",
-            action: "/process",
-            method: "POST",
-            language: "fr-FR"
-          };
-
-          let text;
-          if (emailSent) {
-            text = "Parfait, les horaires vous ont été envoyés par email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
-          } else {
-            text = "Désolée, une erreur est survenue pour l'email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
-          }
-          twiml = await createTwiMLWithSpeech(text, gatherOptions);
-          conversationContext[callSid].step = "general";
-        } else {
-          // Pas d'email souhaité
-          const gatherOptions = {
-            input: "speech",
-            speechTimeout: "auto",
-            action: "/process",
-            method: "POST",
-            language: "fr-FR"
-          };
-
-          const text = "Très bien. Y a-t-il autre chose pour laquelle je peux vous aider ?";
-          twiml = await createTwiMLWithSpeech(text, gatherOptions);
-          conversationContext[callSid].step = "general";
-        }
-
-      } else if (conversationContext[callSid].step === "rdv_choice") {
+      if (conversationContext[callSid].step === "rdv_choice") {
         if (userSpeech.toLowerCase().includes("transf") || userSpeech.toLowerCase().includes("parler") || userSpeech.toLowerCase().includes("direct")) {
           // Transférer
           const text = "Je vous transfère à Monsieur Haliwa. Veuillez patienter.";
@@ -578,7 +661,7 @@ app.post("/process", async (req, res) => {
         conversationContext[callSid].step = "general";
 
       } else {
-        // Cas général - proposer les options principales
+        // Cas général - proposer les options principales avec plus de flexibilité
         const gatherOptions = {
           input: "speech",
           speechTimeout: "auto",
@@ -617,4 +700,6 @@ app.post("/process", async (req, res) => {
 
 app.listen(port, () => {
   console.log(`Standard téléphonique Dream Team actif sur le port ${port}`);
+  console.log(`ElevenLabs API: ${process.env.ELEVENLABS_API_KEY ? 'Configured' : 'Not configured'}`);
+  console.log(`ElevenLabs Voice ID: ${process.env.ELEVENLABS_VOICE_ID ? 'Configured' : 'Not configured'}`);
 });
