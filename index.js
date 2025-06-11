@@ -33,7 +33,7 @@ app.post("/voice", async (req, res) => {
       voice: "alice",
       language: "fr-FR"
     },
-    "Bonjour, je suis l'assistante de Monsieur Aliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd’hui ?"
+    "Bonjour, je suis l'assistante de Monsieur Haliwa, expert en intelligence artificielle. Comment puis-je vous aider aujourd'hui ?"
   );
 
   res.type("text/xml");
@@ -65,7 +65,7 @@ app.post("/process", async (req, res) => {
     const chatCompletion = await openai.chat.completions.create({
       model: "gpt-4o-mini-2024-07-18",
       messages: [
-        { role: "system", content: "Tu es une assistante téléphonique très polie, professionnelle et efficace. Tu t’exprimes avec douceur, en français, et tu aides les clients comme une vraie secrétaire personnelle. Si la personne semble vouloir raccrocher, propose de l’aide une dernière fois, puis dis au revoir." },
+        { role: "system", content: "Tu es une assistante téléphonique très polie, professionnelle et efficace. Tu t'exprimes avec douceur, en français, et tu aides les clients comme une vraie secrétaire personnelle de Monsieur Haliwa, expert en intelligence artificielle. Sois chaleureuse et bienveillante. Si la personne semble vouloir raccrocher, propose de l'aide une dernière fois, puis dis au revoir poliment." },
         { role: "user", content: userSpeech }
       ]
     });
