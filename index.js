@@ -138,16 +138,81 @@ function wantsToEndCall(speech) {
     "merci c'est tout",
     "j'ai terminé",
     "plus rien",
-    "rien d'autre"
+    "rien d'autre",
+    "c'est bon",
+    "merci au revoir"
   ];
   
   const lowerSpeech = speech.toLowerCase();
   return endCallPhrases.some(phrase => lowerSpeech.includes(phrase));
 }
 
+// Fonction améliorée pour analyser l'intention avec plus de contexte
+async function analyzeIntent(userSpeech, conversationHistory = '') {
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini-2024-07-18",
+      messages: [
+        { 
+          role: "system", 
+          content: `Tu es un analyseur d'intentions pour un standard téléphonique professionnel. 
+
+CONTEXTE: Dream Team est une entreprise. L'appelant peut avoir différentes demandes.
+
+INSTRUCTIONS:
+- Analyse le message de l'appelant avec le contexte de la conversation
+- Sois flexible et compréhensif avec les variations de langage naturel
+- Réponds UNIQUEMENT par l'un de ces mots-clés:
+
+HORAIRES: Si la personne demande les horaires d'ouverture, heures d'ouverture, quand vous êtes ouverts, etc.
+Exemples: "quels sont vos horaires", "vous êtes ouverts quand", "à quelle heure vous fermez"
+
+RENDEZ_VOUS: Si la personne veut prendre rendez-vous, un appointment, voir quelqu'un, planifier une rencontre
+Exemples: "je veux un rendez-vous", "prendre rendez-vous", "voir monsieur haliwa", "planifier une rencontre"
+
+PROBLEME: Si la personne mentionne un problème, une question, une réclamation, quelque chose qui ne va pas
+Exemples: "j'ai un problème", "il y a un souci", "je veux me plaindre", "ça ne marche pas"
+
+TRANSFERT: Si la personne demande explicitement à parler à quelqu'un, être transférée, joindre la direction
+Exemples: "je veux parler à monsieur haliwa", "transférez-moi", "passez-moi la direction"
+
+EMAIL: Si la personne veut envoyer un message, laisser un message, communiquer par écrit
+Exemples: "envoyez un email", "laissez un message", "notez que", "transmettez que"
+
+AUTRE: Pour les salutations simples, remerciements, ou demandes peu claires
+
+IMPORTANT: 
+- Ne sois pas trop strict sur les mots exacts
+- Comprends l'intention générale même si c'est dit différemment
+- Le mot "non" seul n'est PAS une fin d'appel
+- Utilise le contexte de conversation pour mieux comprendre`
+        },
+        { role: "user", content: `Message actuel: "${userSpeech}"\n\nContexte conversation: ${conversationHistory}` }
+      ],
+      temperature: 0.1
+    });
+
+    return response.choices[0].message.content.trim();
+  } catch (error) {
+    console.error('Erreur analyse intention:', error);
+    return 'AUTRE';
+  }
+}
+
 let conversationContext = {};
 
 app.post("/voice", async (req, res) => {
+  const callSid = req.body.CallSid;
+  
+  // Initialiser le contexte de conversation
+  if (!conversationContext[callSid]) {
+    conversationContext[callSid] = {
+      history: [],
+      step: 'initial',
+      attempts: 0
+    };
+  }
+
   // Vérifier les horaires d'ouverture
   if (!isBusinessHours()) {
     const gatherOptions = {
@@ -215,7 +280,33 @@ app.post("/process", async (req, res) => {
   const userSpeech = req.body.SpeechResult;
   const callSid = req.body.CallSid;
 
+  // Initialiser le contexte si nécessaire
+  if (!conversationContext[callSid]) {
+    conversationContext[callSid] = {
+      history: [],
+      step: 'initial',
+      attempts: 0
+    };
+  }
+
   if (!userSpeech) {
+    conversationContext[callSid].attempts++;
+    
+    // Après 2 tentatives sans réponse, proposer le transfert
+    if (conversationContext[callSid].attempts >= 2) {
+      const text = "Je n'arrive pas à vous entendre clairement. Souhaitez-vous que je vous transfère à Monsieur Haliwa ?";
+      const gatherOptions = {
+        input: "speech",
+        speechTimeout: "auto",
+        action: "/process",
+        method: "POST",
+        language: "fr-FR"
+      };
+      const twiml = await createTwiMLWithSpeech(text, gatherOptions);
+      res.type("text/xml");
+      return res.send(twiml.toString());
+    }
+
     const gatherOptions = {
       input: "speech",
       speechTimeout: "auto",
@@ -224,12 +315,18 @@ app.post("/process", async (req, res) => {
       language: "fr-FR"
     };
 
-    const text = "Je suis désolée, je n'ai pas bien compris. Pouvez-vous reformuler votre demande ?";
+    const text = "Je vous écoute, pouvez-vous répéter s'il vous plaît ?";
     const twiml = await createTwiMLWithSpeech(text, gatherOptions);
     
     res.type("text/xml");
     return res.send(twiml.toString());
   }
+
+  // Réinitialiser le compteur d'échecs
+  conversationContext[callSid].attempts = 0;
+  
+  // Ajouter à l'historique
+  conversationContext[callSid].history.push(userSpeech);
 
   // Vérifier si l'appelant veut terminer l'appel
   if (wantsToEndCall(userSpeech)) {
@@ -242,51 +339,94 @@ app.post("/process", async (req, res) => {
   }
 
   try {
-    // Analyser l'intention avec GPT
-    const intentAnalysis = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      messages: [
-        { 
-          role: "system", 
-          content: `Tu es un analyseur d'intentions pour un standard téléphonique. Analyse le message de l'appelant et réponds UNIQUEMENT par l'un de ces mots:
-          - "HORAIRES" si la personne demande les horaires d'ouverture
-          - "RENDEZ_VOUS" si la personne veut prendre rendez-vous avec Monsieur Haliwa
-          - "PROBLEME" si la personne dit avoir un problème, expose un problème ou pose une question
-          - "TRANSFERT" si la personne demande explicitement à être transférée ou à parler à quelqu'un
-          - "AUTRE" pour tout autre cas
-          
-          IMPORTANT: Le mot "non" seul ne doit pas être interprété comme une fin d'appel. Analyse le contexte complet.
-          
-          Ne réponds que par un seul mot.`
-        },
-        { role: "user", content: userSpeech }
-      ]
-    });
-
-    const intention = intentAnalysis.choices[0].message.content.trim();
+    // Construire l'historique de conversation pour le contexte
+    const conversationHistory = conversationContext[callSid].history.slice(-3).join(' | ');
+    
+    // Analyser l'intention avec le contexte
+    const intention = await analyzeIntent(userSpeech, conversationHistory);
+    
+    console.log(`Intention détectée: ${intention} pour "${userSpeech}"`);
+    
     let twiml;
 
     if (intention === "HORAIRES") {
-      // Gestion des demandes d'horaires
-      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "horaires") {
-        conversationContext[callSid] = { step: "horaires_response", lastAction: "horaires" };
-        
-        const gatherOptions = {
-          input: "speech",
-          speechTimeout: "auto",
-          action: "/process",
-          method: "POST",
-          language: "fr-FR"
-        };
+      // Répondre directement aux horaires
+      const gatherOptions = {
+        input: "speech",
+        speechTimeout: "auto",
+        action: "/process",
+        method: "POST",
+        language: "fr-FR"
+      };
 
-        const text = "Nous sommes ouverts du dimanche au jeudi, de 9 heures à 18 heures. Souhaitez-vous recevoir ces informations par email également ?";
-        twiml = await createTwiMLWithSpeech(text, gatherOptions);
-        
-      } else if (conversationContext[callSid].step === "horaires_response") {
+      const text = "Nous sommes ouverts du dimanche au jeudi, de 9 heures à 18 heures. Souhaitez-vous recevoir ces informations par email également ?";
+      twiml = await createTwiMLWithSpeech(text, gatherOptions);
+      conversationContext[callSid].step = "waiting_email_confirmation";
+      conversationContext[callSid].lastAction = "horaires";
+
+    } else if (intention === "TRANSFERT") {
+      // Transfert direct
+      const text = "Je vous transfère à Monsieur Haliwa. Veuillez patienter.";
+      twiml = await createTwiMLWithSpeech(text);
+      twiml.dial("+972584469947");
+      delete conversationContext[callSid];
+
+    } else if (intention === "RENDEZ_VOUS") {
+      // Gestion des rendez-vous
+      const gatherOptions = {
+        input: "speech",
+        speechTimeout: "auto",
+        action: "/process",
+        method: "POST",
+        language: "fr-FR"
+      };
+
+      const text = "Très bien, pour votre rendez-vous. Préférez-vous que je vous transfère directement à Monsieur Haliwa, ou que je transmette votre demande par email ?";
+      twiml = await createTwiMLWithSpeech(text, gatherOptions);
+      conversationContext[callSid].step = "rdv_choice";
+      conversationContext[callSid].originalMessage = userSpeech;
+
+    } else if (intention === "PROBLEME") {
+      // Gestion des problèmes
+      const gatherOptions = {
+        input: "speech",
+        speechTimeout: "auto",
+        action: "/process",
+        method: "POST",
+        language: "fr-FR"
+      };
+
+      const text = "Je comprends que vous avez un problème. Préférez-vous que je vous transfère à Monsieur Haliwa pour en discuter directement, ou que je transmette votre message par email ?";
+      twiml = await createTwiMLWithSpeech(text, gatherOptions);
+      conversationContext[callSid].step = "problem_choice";
+      conversationContext[callSid].originalMessage = userSpeech;
+
+    } else if (intention === "EMAIL") {
+      // Demande directe d'email
+      const gatherOptions = {
+        input: "speech",
+        speechTimeout: "auto",
+        action: "/process",
+        method: "POST",
+        language: "fr-FR"
+      };
+
+      const text = "Parfait, je vais noter votre message pour l'envoyer par email. Que souhaitez-vous transmettre exactement ?";
+      twiml = await createTwiMLWithSpeech(text, gatherOptions);
+      conversationContext[callSid].step = "get_email_message";
+      conversationContext[callSid].originalMessage = userSpeech;
+
+    } else {
+      // Gestion des étapes de conversation en cours
+      if (conversationContext[callSid].step === "waiting_email_confirmation") {
         if (userSpeech.toLowerCase().includes("oui") || userSpeech.toLowerCase().includes("email")) {
-          // Demander l'email pour envoyer les horaires
-          conversationContext[callSid].step = "get_email_horaires";
-          
+          // Envoyer les horaires par email
+          const emailSent = await sendEmail(
+            "Horaires d'ouverture",
+            `Voici nos horaires d'ouverture :\n\nDu dimanche au jeudi : 9h00 - 18h00\nVendredi et samedi : Fermé\n\nPour toute question, n'hésitez pas à nous contacter.`,
+            `Demandé le: ${new Date().toLocaleString('fr-FR')}`
+          );
+
           const gatherOptions = {
             input: "speech",
             speechTimeout: "auto",
@@ -295,13 +435,16 @@ app.post("/process", async (req, res) => {
             language: "fr-FR"
           };
 
-          const text = "Parfait. Pouvez-vous me donner votre adresse email s'il vous plaît ?";
+          let text;
+          if (emailSent) {
+            text = "Parfait, les horaires vous ont été envoyés par email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          } else {
+            text = "Désolée, une erreur est survenue pour l'email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          }
           twiml = await createTwiMLWithSpeech(text, gatherOptions);
-          
+          conversationContext[callSid].step = "general";
         } else {
-          // Pas d'email souhaité - continuer la conversation
-          conversationContext[callSid] = { lastAction: "completed" };
-          
+          // Pas d'email souhaité
           const gatherOptions = {
             input: "speech",
             speechTimeout: "auto",
@@ -312,81 +455,18 @@ app.post("/process", async (req, res) => {
 
           const text = "Très bien. Y a-t-il autre chose pour laquelle je peux vous aider ?";
           twiml = await createTwiMLWithSpeech(text, gatherOptions);
+          conversationContext[callSid].step = "general";
         }
-      } else if (conversationContext[callSid].step === "get_email_horaires") {
-        // Envoyer les horaires par email
-        const emailSent = await sendEmail(
-          "Horaires d'ouverture",
-          `Voici nos horaires d'ouverture :\n\nDu dimanche au jeudi : 9h00 - 18h00\nVendredi et samedi : Fermé\n\nPour toute question, n'hésitez pas à nous contacter.`,
-          `Email de contact: ${userSpeech}\nEnvoyé le: ${new Date().toLocaleString('fr-FR')}`
-        );
 
-        conversationContext[callSid] = { lastAction: "completed" };
-        
-        const gatherOptions = {
-          input: "speech",
-          speechTimeout: "auto",
-          action: "/process",
-          method: "POST",
-          language: "fr-FR"
-        };
-
-        let text;
-        if (emailSent) {
-          text = "Parfait, les horaires d'ouverture vous ont été envoyés par email. Y a-t-il autre chose pour laquelle je peux vous aider ?";
-        } else {
-          text = "Désolée, une erreur est survenue lors de l'envoi de l'email. Nos horaires sont du dimanche au jeudi de 9 heures à 18 heures. Y a-t-il autre chose pour laquelle je peux vous aider ?";
-        }
-        twiml = await createTwiMLWithSpeech(text, gatherOptions);
-      }
-
-    } else if (intention === "TRANSFERT") {
-      // Transfert direct demandé
-      const text = "Je vous transfère à Monsieur Haliwa. Veuillez patienter.";
-      twiml = await createTwiMLWithSpeech(text);
-      twiml.dial("+972584469947");
-      delete conversationContext[callSid];
-
-    } else if (intention === "RENDEZ_VOUS") {
-      // Gestion des rendez-vous
-      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "rendez_vous") {
-        conversationContext[callSid] = { step: "rdv_choice", originalMessage: userSpeech, lastAction: "rendez_vous" };
-        
-        const gatherOptions = {
-          input: "speech",
-          speechTimeout: "auto",
-          action: "/process",
-          method: "POST",
-          language: "fr-FR"
-        };
-
-        const text = "Très bien. Préférez-vous que je vous transfère à Monsieur Haliwa, ou que je note votre demande pour lui envoyer par email ?";
-        twiml = await createTwiMLWithSpeech(text, gatherOptions);
-        
       } else if (conversationContext[callSid].step === "rdv_choice") {
-        if (userSpeech.toLowerCase().includes("transf") || userSpeech.toLowerCase().includes("parler") || userSpeech.toLowerCase().includes("maintenant")) {
-          // Transférer l'appel
+        if (userSpeech.toLowerCase().includes("transf") || userSpeech.toLowerCase().includes("parler") || userSpeech.toLowerCase().includes("direct")) {
+          // Transférer
           const text = "Je vous transfère à Monsieur Haliwa. Veuillez patienter.";
           twiml = await createTwiMLWithSpeech(text);
           twiml.dial("+972584469947");
           delete conversationContext[callSid];
-        } else if (userSpeech.toLowerCase().includes("email") || userSpeech.toLowerCase().includes("noter") || userSpeech.toLowerCase().includes("message")) {
-          // Demander le message pour le rendez-vous
-          conversationContext[callSid].step = "get_rdv_message";
-          
-          const gatherOptions = {
-            input: "speech",
-            speechTimeout: "auto",
-            action: "/process",
-            method: "POST",
-            language: "fr-FR"
-          };
-
-          const text = "D'accord. Quel message souhaitez-vous transmettre exactement pour votre demande de rendez-vous ?";
-          twiml = await createTwiMLWithSpeech(text, gatherOptions);
-          
         } else {
-          // Redemander le choix
+          // Email pour rendez-vous
           const gatherOptions = {
             input: "speech",
             speechTimeout: "auto",
@@ -395,19 +475,19 @@ app.post("/process", async (req, res) => {
             language: "fr-FR"
           };
 
-          const text = "Je n'ai pas bien compris. Préférez-vous que je vous transfère à Monsieur Haliwa, ou que je note votre demande pour lui envoyer par email ?";
+          const text = "D'accord, je vais transmettre votre demande de rendez-vous par email. Pouvez-vous me donner plus de détails sur ce rendez-vous ?";
           twiml = await createTwiMLWithSpeech(text, gatherOptions);
+          conversationContext[callSid].step = "get_rdv_details";
         }
-      } else if (conversationContext[callSid].step === "get_rdv_message") {
-        // Envoyer la demande de rendez-vous par email
+
+      } else if (conversationContext[callSid].step === "get_rdv_details") {
+        // Envoyer la demande de rendez-vous
         const emailSent = await sendEmail(
           "Demande de rendez-vous",
-          `Nouvelle demande de rendez-vous :\n\n"${userSpeech}"\n\nDemande initiale : "${conversationContext[callSid].originalMessage}"`,
+          `Nouvelle demande de rendez-vous :\n\nDemande initiale : "${conversationContext[callSid].originalMessage}"\n\nDétails : "${userSpeech}"`,
           `Reçu le: ${new Date().toLocaleString('fr-FR')}`
         );
 
-        conversationContext[callSid] = { lastAction: "completed" };
-        
         const gatherOptions = {
           input: "speech",
           speechTimeout: "auto",
@@ -418,53 +498,22 @@ app.post("/process", async (req, res) => {
 
         let text;
         if (emailSent) {
-          text = "Parfait, votre demande de rendez-vous a été transmise à Monsieur Haliwa. Il vous recontactera dans les plus brefs délais. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          text = "Parfait, votre demande de rendez-vous a été transmise à Monsieur Haliwa. Il vous recontactera rapidement. Y a-t-il autre chose pour laquelle je peux vous aider ?";
         } else {
-          text = "Désolée, une erreur est survenue. Veuillez rappeler plus tard ou contacter directement Monsieur Haliwa au +972584469947. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          text = "Désolée, une erreur est survenue. Veuillez rappeler plus tard. Y a-t-il autre chose que je puisse faire pour vous ?";
         }
         twiml = await createTwiMLWithSpeech(text, gatherOptions);
-      }
+        conversationContext[callSid].step = "general";
 
-    } else if (intention === "PROBLEME") {
-      // Gestion des problèmes/questions
-      if (!conversationContext[callSid] || conversationContext[callSid].lastAction !== "probleme") {
-        conversationContext[callSid] = { step: "problem_choice", originalMessage: userSpeech, lastAction: "probleme" };
-        
-        const gatherOptions = {
-          input: "speech",
-          speechTimeout: "auto",
-          action: "/process",
-          method: "POST",
-          language: "fr-FR"
-        };
-
-        const text = "D'accord, je peux transmettre cela à la direction. Préférez-vous que je vous transfère à Monsieur Haliwa, ou que je note votre message pour lui envoyer par email ?";
-        twiml = await createTwiMLWithSpeech(text, gatherOptions);
-        
       } else if (conversationContext[callSid].step === "problem_choice") {
-        if (userSpeech.toLowerCase().includes("transf") || userSpeech.toLowerCase().includes("parler") || userSpeech.toLowerCase().includes("maintenant")) {
-          // Transférer l'appel
+        if (userSpeech.toLowerCase().includes("transf") || userSpeech.toLowerCase().includes("parler") || userSpeech.toLowerCase().includes("direct")) {
+          // Transférer
           const text = "Je vous transfère à Monsieur Haliwa. Veuillez patienter.";
           twiml = await createTwiMLWithSpeech(text);
           twiml.dial("+972584469947");
           delete conversationContext[callSid];
-        } else if (userSpeech.toLowerCase().includes("email") || userSpeech.toLowerCase().includes("noter") || userSpeech.toLowerCase().includes("message")) {
-          // Demander le message détaillé
-          conversationContext[callSid].step = "get_problem_message";
-          
-          const gatherOptions = {
-            input: "speech",
-            speechTimeout: "auto",
-            action: "/process",
-            method: "POST",
-            language: "fr-FR"
-          };
-
-          const text = "Parfait. Quel message souhaitez-vous transmettre exactement ?";
-          twiml = await createTwiMLWithSpeech(text, gatherOptions);
-          
         } else {
-          // Redemander le choix
+          // Email pour problème
           const gatherOptions = {
             input: "speech",
             speechTimeout: "auto",
@@ -473,19 +522,19 @@ app.post("/process", async (req, res) => {
             language: "fr-FR"
           };
 
-          const text = "Je n'ai pas bien compris. Préférez-vous que je vous transfère à Monsieur Haliwa, ou que je note votre message pour lui envoyer par email ?";
+          const text = "D'accord, je vais transmettre votre message par email. Pouvez-vous me donner plus de détails sur votre problème ?";
           twiml = await createTwiMLWithSpeech(text, gatherOptions);
+          conversationContext[callSid].step = "get_problem_details";
         }
-      } else if (conversationContext[callSid].step === "get_problem_message") {
-        // Envoyer le problème par email
+
+      } else if (conversationContext[callSid].step === "get_problem_details") {
+        // Envoyer le problème
         const emailSent = await sendEmail(
-          "Question/Problème client",
-          `Nouveau message d'un client :\n\n"${userSpeech}"\n\nMessage initial : "${conversationContext[callSid].originalMessage}"`,
+          "Problème client",
+          `Problème signalé par un client :\n\nProblème initial : "${conversationContext[callSid].originalMessage}"\n\nDétails : "${userSpeech}"`,
           `Reçu le: ${new Date().toLocaleString('fr-FR')}`
         );
 
-        conversationContext[callSid] = { lastAction: "completed" };
-        
         const gatherOptions = {
           input: "speech",
           speechTimeout: "auto",
@@ -496,32 +545,59 @@ app.post("/process", async (req, res) => {
 
         let text;
         if (emailSent) {
-          text = "Merci, votre message a été transmis à la direction. Vous recevrez une réponse dans les plus brefs délais. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          text = "Merci, votre message a été transmis à la direction. Vous recevrez une réponse rapidement. Y a-t-il autre chose pour laquelle je peux vous aider ?";
         } else {
-          text = "Désolée, une erreur est survenue. Veuillez rappeler plus tard. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+          text = "Désolée, une erreur est survenue. Veuillez rappeler plus tard. Y a-t-il autre chose que je puisse faire pour vous ?";
         }
         twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+
+      } else if (conversationContext[callSid].step === "get_email_message") {
+        // Envoyer le message général
+        const emailSent = await sendEmail(
+          "Message client",
+          `Message reçu d'un client :\n\n"${userSpeech}"`,
+          `Reçu le: ${new Date().toLocaleString('fr-FR')}`
+        );
+
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        let text;
+        if (emailSent) {
+          text = "Parfait, votre message a été transmis. Y a-t-il autre chose pour laquelle je peux vous aider ?";
+        } else {
+          text = "Désolée, une erreur est survenue. Y a-t-il autre chose que je puisse faire pour vous ?";
+        }
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
+
+      } else {
+        // Cas général - proposer les options principales
+        const gatherOptions = {
+          input: "speech",
+          speechTimeout: "auto",
+          action: "/process",
+          method: "POST",
+          language: "fr-FR"
+        };
+
+        const text = "Je peux vous aider avec nos horaires d'ouverture, prendre un rendez-vous, ou transmettre un message. Que souhaitez-vous ?";
+        twiml = await createTwiMLWithSpeech(text, gatherOptions);
+        conversationContext[callSid].step = "general";
       }
-
-    } else {
-      // Cas général - réponse polie et redirection
-      const gatherOptions = {
-        input: "speech",
-        speechTimeout: "auto",
-        action: "/process",
-        method: "POST",
-        language: "fr-FR"
-      };
-
-      const text = "Je suis désolée, je n'ai pas bien compris votre demande. Souhaitez-vous prendre un rendez-vous, connaître nos horaires, ou avez-vous un problème à signaler ?";
-      twiml = await createTwiMLWithSpeech(text, gatherOptions);
     }
 
     res.type("text/xml");
     res.send(twiml.toString());
 
   } catch (error) {
-    console.error("Erreur GPT:", error);
+    console.error("Erreur traitement:", error);
     
     const gatherOptions = {
       input: "speech",
@@ -531,7 +607,7 @@ app.post("/process", async (req, res) => {
       language: "fr-FR"
     };
 
-    const text = "Une erreur est survenue. Pouvez-vous répéter votre demande s'il vous plaît ?";
+    const text = "Une erreur technique est survenue. Souhaitez-vous que je vous transfère à Monsieur Haliwa ?";
     const twiml = await createTwiMLWithSpeech(text, gatherOptions);
     
     res.type("text/xml");
